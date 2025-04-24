@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+
+<body>
+    <script>
+        async function draw() {
+            // const { Chart } = await import("https://cdn.jsdelivr.net/npm/chart.js");
+            // // const ctx = document.getElementById("myChart");
+            // new Chart(ctx, {
+            //     type: "bar",
+            //     data: {
+            //         labels: ["1KB", "1MB", "100MB"],
+            //         datasets: [
+            //             { label: "WebGPU", data: [0.1, 2.3, 210] },
+            //             { label: "WebAssembly", data: [0.05, 15.7, 1500] },
+            //         ],
+            //     },
+            // });
+            const canvas = document.getElementById("canvas");
+            if (canvas.getContext) {
+                const ctx = canvas.getContext("2d");
+
+                ctx.fillRect(25, 25, 100, 100);
+                ctx.clearRect(45, 45, 60, 60);
+                ctx.strokeRect(50, 50, 50, 50);
+            }
+        }
+        draw();
+        // const ctx = document.getElementById("myChart");
+        // new Chart(ctx, {
+        //     type: "bar",
+        //     data: {
+        //         labels: ["1KB", "1MB", "100MB"],
+        //         datasets: [
+        //             { label: "WebGPU", data: [0.1, 2.3, 210] },
+        //             { label: "WebAssembly", data: [0.05, 15.7, 1500] },
+        //         ],
+        //     },
+        // });
+    </script>
+</body>

@@ -3,379 +3,380 @@
 <body>
   <script src="sha256Shader.js"></script>
   <script>
-    async function initWebGPU() {
-      // 1. 初始化WebGPU
+    async function webgpuSHA256(data) {
       const adapter = await navigator.gpu.requestAdapter();
       const device = await adapter.requestDevice();
+      // console.log(device.limits.maxComputeWorkgroupsPerDimension);
 
-      // 2. 创建计算管线
-      // const shaderModule = device.createShaderModule({ code: sha256Shader });
-      const shaderModule = device.createShaderModule({ code: await fetch('sha256.wgsl').then(r => r.text()) });
-      const computePipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: {
-          module: shaderModule,
-          entryPoint: 'main'
-        }
+      const fromHexString = (hexString) => Uint32Array.from((hexString.split("").map(e => e.charCodeAt(0))));
+
+      // 输入数据，转换为 Uint32Array
+      const inputText = data;
+      const firstMatrix = fromHexString(inputText);
+
+
+      // 输入数据缓冲区
+      const gpuBufferFirstMatrix = device.createBuffer({
+        mappedAtCreation: true,
+        size: firstMatrix.byteLength,
+        usage: GPUBufferUsage.STORAGE,
       });
+      const arrayBufferFirstMatrix = gpuBufferFirstMatrix.getMappedRange();
+      new Int32Array(arrayBufferFirstMatrix).set(firstMatrix);
+      gpuBufferFirstMatrix.unmap();
 
-      return { device, computePipeline };
-    }
-
-
-    async function computeSHA256(device, computePipeline, inputData) {
-      // 1. 数据预处理（填充并分块）
-      const paddedData = sha256Pad(inputData);
-      const chunkSize = 64;
-      const chunkCount = Math.floor(paddedData.byteLength / chunkSize);
-
-      // 转换为u32数组块（大端序）
-      const inputBlocks = new Uint32Array(chunkCount * 16);
-      const dataView = new DataView(paddedData.buffer);
-
-      for (let i = 0; i < chunkCount; i++) {
-        const startOffset = i * chunkSize;
-        // 确保不超过缓冲区范围
-        for (let j = 0; j < 16; j++) {
-          const byteOffset = startOffset + j * 4;
-          if (byteOffset + 4 <= dataView.byteLength) {
-            inputBlocks[i * 16 + j] = dataView.getUint32(byteOffset, false);
-          } else {
-            inputBlocks[i * 16 + j] = 0; // 填充0（如果块未满）
-          }
-        }
-      }
-
-      // console.log("填充后长度:", paddedData.byteLength); // 必须 >=64
-      // console.log("分块数量:", Math.ceil(paddedData.byteLength / 64)); // 必须 >=1
-      // console.log("输入数据（填充后）:", paddedData);
-      // console.log("分块后的Uint32数据:", inputBlocks);
-      // console.log("原始数据:", inputData);
-      // console.log("填充后数据:", paddedData);
-      // console.log("分块后的Uint32数据:", inputBlocks);
-
-
-      // 2. 创建GPU缓冲区
-      const inputBuffer = device.createBuffer({
-        size: inputBlocks.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-        mappedAtCreation: true
+      //输入数据大小缓冲区
+      const size = new Uint32Array([firstMatrix.length]);
+      const gpuBufferSize = device.createBuffer({
+        mappedAtCreation: true,
+        size: Int32Array.BYTES_PER_ELEMENT,
+        usage: GPUBufferUsage.STORAGE,
       });
-      new Uint32Array(inputBuffer.getMappedRange()).set(inputBlocks);
-      inputBuffer.unmap();
+      const arrayBufferSize = gpuBufferSize.getMappedRange();
+      new Int32Array(arrayBufferSize).set(size);
+      gpuBufferSize.unmap();
 
-      const outputBuffer = device.createBuffer({
-        size: chunkCount * 32, // 每个块输出32字节哈希
+      //输出结果缓冲区 32字节
+      const resultMatrixBufferSize = Uint32Array.BYTES_PER_ELEMENT * 32;
+      const resultMatrixBuffer = device.createBuffer({
+        size: resultMatrixBufferSize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
       });
 
-      // const outputBufferSize = chunkCount * 32; // 每个块输出32字节
-      // console.log("输出缓冲区大小:", outputBufferSize); // 必须 >0 且是4的倍数
-
-      const chainStateBuffer = device.createBuffer({
-        size: chunkCount * 32, // 每个块的状态存储
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-      });
-
-      // 3. 创建绑定组
-      const bindGroup = device.createBindGroup({
-        layout: computePipeline.getBindGroupLayout(0),
+      // //创建绑定组布局，对应上面三个缓冲区
+      const bindGroupLayout = device.createBindGroupLayout({
         entries: [
-          { binding: 0, resource: { buffer: inputBuffer } },
-          { binding: 1, resource: { buffer: outputBuffer } },
-          { binding: 2, resource: { buffer: chainStateBuffer } }
+          { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+          { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+          { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
+        ]
+      });
+      //绑定
+      const bindGroup = device.createBindGroup({
+        layout: bindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: gpuBufferFirstMatrix } },
+          { binding: 1, resource: { buffer: gpuBufferSize } },
+          { binding: 2, resource: { buffer: resultMatrixBuffer } }
         ]
       });
 
-      // 4. 提交计算任务
+      // // 创建计算管线
+      const shaderModule = device.createShaderModule({ code: sha256Shader });
+      const computePipeline = device.createComputePipeline({
+        layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+        compute: { module: shaderModule, entryPoint: "main" }
+      });
+
+      //计算
       const commandEncoder = device.createCommandEncoder();
       const passEncoder = commandEncoder.beginComputePass();
       passEncoder.setPipeline(computePipeline);
       passEncoder.setBindGroup(0, bindGroup);
-      passEncoder.dispatchWorkgroups(Math.ceil(chunkCount / 64)); // 每个工作组64线程
+      passEncoder.dispatchWorkgroups(128);
       passEncoder.end();
 
-      // 5. 读取结果
-      const readbackBuffer = device.createBuffer({
-        size: outputBuffer.size,
+      //读取结果缓冲区
+      const gpuReadBuffer = device.createBuffer({
+        size: resultMatrixBufferSize,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
       });
-      commandEncoder.copyBufferToBuffer(outputBuffer, 0, readbackBuffer, 0, outputBuffer.size);
-      device.queue.submit([commandEncoder.finish()]);
+      commandEncoder.copyBufferToBuffer(
+        resultMatrixBuffer, 0, gpuReadBuffer, 0, resultMatrixBufferSize
+      );
 
-      await readbackBuffer.mapAsync(GPUMapMode.READ);
-      const result = new Uint8Array(readbackBuffer.getMappedRange().slice(0));
-      // console.log(result.length);
-      readbackBuffer.unmap(); // 必须解除映射
+      //提交命令 读取数据
+      const gpuCommands = commandEncoder.finish();
+      const start = performance.now();
+      device.queue.submit([gpuCommands]);
+      await device.queue.onSubmittedWorkDone(); // 等待 GPU 完成
+      const end = performance.now();
+      // console.log("计算时间:", end - start, "ms");
+
+      await gpuReadBuffer.mapAsync(GPUMapMode.READ);
+      const arrayBuffer = gpuReadBuffer.getMappedRange();
+
+      // 读取结果
+      let str = "";
+      for (let value of Array.from(new Uint32Array(arrayBuffer))) {
+        str += value.toString(16);
+      }
+      console.log("SHA-256 结果:", str);
+      // return size
+    }
+
+    async function measureWebGPU(data) {
+      const start = performance.now();
+      await webgpuSHA256(data);
+      const end = performance.now();
+      return end - start;
+      // console.log("计算时间:", end - start, "ms");
+    }
+
+    async function testTime(runs, data) {
+      let totalTime = 0;
+      await measureWebGPU(data);
+      for (let i = 0; i < runs; i++) {
+        totalTime += await measureWebGPU(data);
+      }
+      const avgTime = totalTime / runs;
+      // const hashrate = (dataSize / avgTime) * 1000; // Hashes/s
+      // console.log("平均计算时间:", avgTime, "ms");
+      return avgTime;
+      // console.log("Hashrate:", hashrate, "Hashes/s");
+    }
+
+    // const runs = 1;
+    // const data = 'hello';
+    // testTime(runs, data);
+
+    // 生成 1KB
+    const str1KB = new Array(1024).fill('A').join('');
+
+    // 生成 1MB
+    const str1MB = Array.from({ length: 1048576 }, () => 'A').join('');
+
+    // 生成 100MB（分块）
+    function generate100MB() {
+      // const chunkSize = 1024 * 1024; // 1MB
+      // const chunks = [];
+      // for (let i = 0; i < 100; i++) {
+      //   chunks.push(new Uint8Array(chunkSize).fill(65));
+      // }
+      // return new TextDecoder().decode(new Uint8Array([].concat(...chunks)));
+
+      const chunkSize = 10 * 1024 * 1024; // 每次生成 10MB
+      const totalSize = 10 * 1024 * 1024; // 目标大小（字节）
+      let result = "";
+
+      for (let i = 0; i < totalSize; i += chunkSize) {
+        const currentChunkSize = Math.min(chunkSize, totalSize - i);
+        result += "a".repeat(currentChunkSize);
+      }
+
       return result;
     }
+    const str100MB = generate100MB();
+    // 测试数据集
+    const datasets = {
+      small: str1KB,      // 1 KB
+      medium: str1MB, // 1 MB
+      large: str100MB // 100 MB
+    };
 
-    // SHA-256填充函数
-    function sha256Pad(data) {
-      const bitLen = data.length * 8; // 原始数据的位长度
-      const dataWithPadding = data.length + 1; // 添加 0x80 后的长度（字节）
-
-      // 计算需要填充的 0 的字节数
-      const requiredBytes = dataWithPadding + 8; // 包含长度字段后的总需求字节
-      const padLen = (64 - (requiredBytes % 64)) % 64; // 填充到下一个64字节边界
-
-      // 创建填充后的数组
-      const padded = new Uint8Array(dataWithPadding + padLen + 8);
-      padded.set(data);
-      padded[data.length] = 0x80; // 添加 0x80
-
-      // 填充 0
-      for (let i = data.length + 1; i < dataWithPadding + padLen; i++) {
-        padded[i] = 0;
+    // 运行测试
+    async function runBenchmark() {
+      for (const [name, data] of Object.entries(datasets)) {
+        // WebGPU
+        const webgpuTime = await testTime(1, data);
+        // WebAssembly
+        // const wasmTime = measureWasm(data);
+        // console.table({
+        //   //   [name]: { WebGPU: webgpuTime, Wasm: wasmTime }
+        //   [name]: { WebGPU: webgpuTime }
+        // });
       }
-
-      // 添加大端序的位长度（64位）
-      const view = new DataView(padded.buffer);
-      view.setBigUint64(padded.length - 8, BigInt(bitLen), false); // 最后8字节
-
-      return padded;
-    }
-    function bytesToHex(bytes) {
-      return Array.from(bytes)
-        .map(b => b.toString(16).padStart(2, '0'))
-        .join('');
     }
 
-    // 测试运行
-    async function test() {
-      const { device, computePipeline } = await initWebGPU();
+    runBenchmark();
 
-      // const inputData = new Uint8Array(64).fill(0); // 64字节全零
-      // const hash = await computeSHA256(device, computePipeline, inputData);
-      // console.log("全零哈希:", bytesToHex(hash));
-
-      // const inputData = new TextEncoder().encode("Hello WebGPU!");
-      // const paddedData = sha256Pad(inputData);
-      // console.log("填充后数据:", paddedData);
-      // const hash = await computeSHA256(device, computePipeline, inputData);
-      // console.log("短字符串哈希:", bytesToHex(hash));
-
-      // 测试1KB数据
-      const input1KB = new TextEncoder().encode("Hello WebGPU!");
-      const start1Kb = performance.now();
-      const hash1KB = await computeSHA256(device, computePipeline, input1KB);
-
-      // if (hash1KB.length == 0) console.log("budui");
-      // let str = "";
-      // for (let value of Array.from(new Uint32Array(hash1KB.buffer))) {
-      //   str += value.toString(16);
-      // }
-
-      // // console.log("1KB Hash:", Array.from(hash1KB).map(b => b.toString(16).padStart(2, '0')).join(''));
-      // console.log(hash1KB);
-      // console.log("1KB Hash:", str);
-      console.log(`1KB Time: ${performance.now() - start1Kb}ms`)
-
-      // 测试1MB数据
-      const input1MB = new Uint8Array(1024 * 1024).fill(65); // 填充'A'
-      const start1MB = performance.now();
-      const hash1MB = await computeSHA256(device, computePipeline, input1MB);
-      console.log(`1MB Time: ${performance.now() - start1MB}ms`);
-
-      // 测试100MB数据
-      // const input100MB = new Uint8Array(1 * 1024 * 1024);
-      // for (let i = 0; i < input100MB.length; i++) {
-      //   input100MB.set(input1MB, i * 1024 * 1024);
-      // }
-      // 分块生成，避免一次性分配大内存
-      const data100MB = new Uint8Array(100 * 1024 * 1024);
-      for (let i = 0; i < data100MB.length; i += 65536) {
-        const chunk = crypto.getRandomValues(new Uint8Array(65536));
-        data100MB.set(chunk, i);
-      }
-      const start100MB = performance.now();
-      const hash100MB = await computeSHA256(device, computePipeline, data100MB);
-      console.log(`100MB Time: ${performance.now() - start100MB}ms`);
-    }
-    test();
+    // const runs = 100;
+    // const data = 'hello';
+    // testTime(runs, str100MB);
 
 
+    // async function initWebGPU() {
+    //   // 1. 初始化WebGPU
+    //   const adapter = await navigator.gpu.requestAdapter();
+    //   const device = await adapter.requestDevice();
 
-    // async function webgpuSHA256(data) {
-    // const adapter = await navigator.gpu.requestAdapter();
-    // const device = await adapter.requestDevice();
-    // // console.log(device.limits.maxComputeWorkgroupsPerDimension);
+    //   // 2. 创建计算管线
+    //   // const shaderModule = device.createShaderModule({ code: sha256Shader });
+    //   const shaderModule = device.createShaderModule({ code: await fetch('sha256.wgsl').then(r => r.text()) });
+    //   const computePipeline = device.createComputePipeline({
+    //     layout: 'auto',
+    //     compute: {
+    //       module: shaderModule,
+    //       entryPoint: 'main'
+    //     }
+    //   });
 
-    // const fromHexString = (hexString) => Uint32Array.from((hexString.split("").map(e => e.charCodeAt(0))));
-
-    // // 输入数据，转换为 Uint32Array
-    // const inputText = data;
-    // const firstMatrix = fromHexString(inputText);
-
-
-    // // 输入数据缓冲区
-    // const gpuBufferFirstMatrix = device.createBuffer({
-    //   mappedAtCreation: true,
-    //   size: firstMatrix.byteLength,
-    //   usage: GPUBufferUsage.STORAGE,
-    // });
-    // const arrayBufferFirstMatrix = gpuBufferFirstMatrix.getMappedRange();
-    // new Int32Array(arrayBufferFirstMatrix).set(firstMatrix);
-    // gpuBufferFirstMatrix.unmap();
-
-    // //输入数据大小缓冲区
-    // const size = new Uint32Array([firstMatrix.length]);
-    // const gpuBufferSize = device.createBuffer({
-    //   mappedAtCreation: true,
-    //   size: Int32Array.BYTES_PER_ELEMENT,
-    //   usage: GPUBufferUsage.STORAGE,
-    // });
-    // const arrayBufferSize = gpuBufferSize.getMappedRange();
-    // new Int32Array(arrayBufferSize).set(size);
-    // gpuBufferSize.unmap();
-
-    // //输出结果缓冲区 32字节
-    // const resultMatrixBufferSize = Uint32Array.BYTES_PER_ELEMENT * 32;
-    // const resultMatrixBuffer = device.createBuffer({
-    //   size: resultMatrixBufferSize,
-    //   usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-    // });
-
-    // // //创建绑定组布局，对应上面三个缓冲区
-    // const bindGroupLayout = device.createBindGroupLayout({
-    //   entries: [
-    //     { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-    //     { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-    //     { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
-    //   ]
-    // });
-    // //绑定
-    // const bindGroup = device.createBindGroup({
-    //   layout: bindGroupLayout,
-    //   entries: [
-    //     { binding: 0, resource: { buffer: gpuBufferFirstMatrix } },
-    //     { binding: 1, resource: { buffer: gpuBufferSize } },
-    //     { binding: 2, resource: { buffer: resultMatrixBuffer } }
-    //   ]
-    // });
-
-    // // // 创建计算管线
-    // const shaderModule = device.createShaderModule({ code: sha256Shader });
-    // const computePipeline = device.createComputePipeline({
-    //   layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
-    //   compute: { module: shaderModule, entryPoint: "main" }
-    // });
-
-    // //计算
-    // const commandEncoder = device.createCommandEncoder();
-    // const passEncoder = commandEncoder.beginComputePass();
-    // passEncoder.setPipeline(computePipeline);
-    // passEncoder.setBindGroup(0, bindGroup);
-    // passEncoder.dispatchWorkgroups(128);
-    // passEncoder.end();
-
-    // //读取结果缓冲区
-    // const gpuReadBuffer = device.createBuffer({
-    //   size: resultMatrixBufferSize,
-    //   usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    // });
-    // commandEncoder.copyBufferToBuffer(
-    //   resultMatrixBuffer, 0, gpuReadBuffer, 0, resultMatrixBufferSize
-    // );
-
-    // //提交命令 读取数据
-    // const gpuCommands = commandEncoder.finish();
-    // const start = performance.now();
-    // device.queue.submit([gpuCommands]);
-    // await device.queue.onSubmittedWorkDone(); // 等待 GPU 完成
-    // const end = performance.now();
-    // // console.log("计算时间:", end - start, "ms");
-
-    // await gpuReadBuffer.mapAsync(GPUMapMode.READ);
-    // const arrayBuffer = gpuReadBuffer.getMappedRange();
-
-    // // 读取结果
-    // let str = "";
-    // for (let value of Array.from(new Uint32Array(arrayBuffer))) {
-    //   str += value.toString(16);
-    // }
-    // console.log("SHA-256 结果:", str);
-    //   // return size
+    //   return { device, computePipeline };
     // }
 
-    //     async function measureWebGPU(data) {
-    //       const start = performance.now();
-    //       await webgpuSHA256(data);
-    //       const end = performance.now();
-    //       return end - start;
-    //       // console.log("计算时间:", end - start, "ms");
-    //     }
 
-    //     async function testTime(runs, data) {
-    //       let totalTime = 0;
-    //       await measureWebGPU(data);
-    //       for (let i = 0; i < runs; i++) {
-    //         totalTime += await measureWebGPU(data);
-    //       }
-    //       const avgTime = totalTime / runs;
-    //       // const hashrate = (dataSize / avgTime) * 1000; // Hashes/s
-    //       // console.log("平均计算时间:", avgTime, "ms");
-    //       return avgTime;
-    //       // console.log("Hashrate:", hashrate, "Hashes/s");
-    //     }
+    // async function computeSHA256(device, computePipeline, inputData) {
+    //   // 1. 数据预处理（填充并分块）
+    //   const paddedData = sha256Pad(inputData);
+    //   const chunkSize = 64;
+    //   const chunkCount = Math.floor(paddedData.byteLength / chunkSize);
 
-    //     // const runs = 1;
-    //     // const data = 'hello';
-    //     // testTime(runs, data);
+    //   // 转换为u32数组块（大端序）
+    //   const inputBlocks = new Uint32Array(chunkCount * 16);
+    //   const dataView = new DataView(paddedData.buffer);
 
-    //     // 生成 1KB
-    //     const str1KB = new Array(1024).fill('A').join('');
-
-    //     // 生成 1MB
-    //     const str1MB = Array.from({ length: 1048576 }, () => 'A').join('');
-
-    //     // 生成 100MB（分块）
-    //     function generate100MB() {
-    //       // const chunkSize = 1024 * 1024; // 1MB
-    //       // const chunks = [];
-    //       // for (let i = 0; i < 100; i++) {
-    //       //   chunks.push(new Uint8Array(chunkSize).fill(65));
-    //       // }
-    //       // return new TextDecoder().decode(new Uint8Array([].concat(...chunks)));
-
-    //       const chunkSize = 10 * 1024 * 1024; // 每次生成 10MB
-    //       const totalSize = 10 * 1024 * 1024; // 目标大小（字节）
-    //       let result = "";
-
-    //       for (let i = 0; i < totalSize; i += chunkSize) {
-    //         const currentChunkSize = Math.min(chunkSize, totalSize - i);
-    //         result += "a".repeat(currentChunkSize);
-    //       }
-
-    //       return result;
-    //     }
-    //     const str100MB = generate100MB();
-    //     // 测试数据集
-    //     const datasets = {
-    //       small: str1KB,      // 1 KB
-    //       medium: str1MB, // 1 MB
-    //       large: str100MB // 100 MB
-    //     };
-
-    //     // 运行测试
-    //     async function runBenchmark() {
-    //       for (const [name, data] of Object.entries(datasets)) {
-    //         // WebGPU
-    //         const webgpuTime = await testTime(1, data);
-    //         // WebAssembly
-    //         // const wasmTime = measureWasm(data);
-    //         // console.table({
-    //         //   //   [name]: { WebGPU: webgpuTime, Wasm: wasmTime }
-    //         //   [name]: { WebGPU: webgpuTime }
-    //         // });
+    //   for (let i = 0; i < chunkCount; i++) {
+    //     const startOffset = i * chunkSize;
+    //     // 确保不超过缓冲区范围
+    //     for (let j = 0; j < 16; j++) {
+    //       const byteOffset = startOffset + j * 4;
+    //       if (byteOffset + 4 <= dataView.byteLength) {
+    //         inputBlocks[i * 16 + j] = dataView.getUint32(byteOffset, false);
+    //       } else {
+    //         inputBlocks[i * 16 + j] = 0; // 填充0（如果块未满）
     //       }
     //     }
+    //   }
 
-    //     runBenchmark();
+    //   // console.log("填充后长度:", paddedData.byteLength); // 必须 >=64
+    //   // console.log("分块数量:", Math.ceil(paddedData.byteLength / 64)); // 必须 >=1
+    //   // console.log("输入数据（填充后）:", paddedData);
+    //   // console.log("分块后的Uint32数据:", inputBlocks);
+    //   // console.log("原始数据:", inputData);
+    //   // console.log("填充后数据:", paddedData);
+    //   // console.log("分块后的Uint32数据:", inputBlocks);
 
-        // const runs = 100;
-        // const data = 'hello';
-        // testTime(runs, str100MB);
+
+    //   // 2. 创建GPU缓冲区
+    //   const inputBuffer = device.createBuffer({
+    //     size: inputBlocks.byteLength,
+    //     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    //     mappedAtCreation: true
+    //   });
+    //   new Uint32Array(inputBuffer.getMappedRange()).set(inputBlocks);
+    //   inputBuffer.unmap();
+
+    //   const outputBuffer = device.createBuffer({
+    //     size: chunkCount * 32, // 每个块输出32字节哈希
+    //     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    //   });
+
+    //   // const outputBufferSize = chunkCount * 32; // 每个块输出32字节
+    //   // console.log("输出缓冲区大小:", outputBufferSize); // 必须 >0 且是4的倍数
+
+    //   const chainStateBuffer = device.createBuffer({
+    //     size: chunkCount * 32, // 每个块的状态存储
+    //     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    //   });
+
+    //   // 3. 创建绑定组
+    //   const bindGroup = device.createBindGroup({
+    //     layout: computePipeline.getBindGroupLayout(0),
+    //     entries: [
+    //       { binding: 0, resource: { buffer: inputBuffer } },
+    //       { binding: 1, resource: { buffer: outputBuffer } },
+    //       { binding: 2, resource: { buffer: chainStateBuffer } }
+    //     ]
+    //   });
+
+    //   // 4. 提交计算任务
+    //   const commandEncoder = device.createCommandEncoder();
+    //   const passEncoder = commandEncoder.beginComputePass();
+    //   passEncoder.setPipeline(computePipeline);
+    //   passEncoder.setBindGroup(0, bindGroup);
+    //   passEncoder.dispatchWorkgroups(Math.ceil(chunkCount / 64)); // 每个工作组64线程
+    //   passEncoder.end();
+
+    //   // 5. 读取结果
+    //   const readbackBuffer = device.createBuffer({
+    //     size: outputBuffer.size,
+    //     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    //   });
+    //   commandEncoder.copyBufferToBuffer(outputBuffer, 0, readbackBuffer, 0, outputBuffer.size);
+    //   device.queue.submit([commandEncoder.finish()]);
+
+    //   await readbackBuffer.mapAsync(GPUMapMode.READ);
+    //   const result = new Uint8Array(readbackBuffer.getMappedRange().slice(0));
+    //   // console.log(result.length);
+    //   readbackBuffer.unmap(); // 必须解除映射
+    //   return result;
+    // }
+
+    // // SHA-256填充函数
+    // function sha256Pad(data) {
+    //   const bitLen = data.length * 8; // 原始数据的位长度
+    //   const dataWithPadding = data.length + 1; // 添加 0x80 后的长度（字节）
+
+    //   // 计算需要填充的 0 的字节数
+    //   const requiredBytes = dataWithPadding + 8; // 包含长度字段后的总需求字节
+    //   const padLen = (64 - (requiredBytes % 64)) % 64; // 填充到下一个64字节边界
+
+    //   // 创建填充后的数组
+    //   const padded = new Uint8Array(dataWithPadding + padLen + 8);
+    //   padded.set(data);
+    //   padded[data.length] = 0x80; // 添加 0x80
+
+    //   // 填充 0
+    //   for (let i = data.length + 1; i < dataWithPadding + padLen; i++) {
+    //     padded[i] = 0;
+    //   }
+
+    //   // 添加大端序的位长度（64位）
+    //   const view = new DataView(padded.buffer);
+    //   view.setBigUint64(padded.length - 8, BigInt(bitLen), false); // 最后8字节
+
+    //   return padded;
+    // }
+    // function bytesToHex(bytes) {
+    //   return Array.from(bytes)
+    //     .map(b => b.toString(16).padStart(2, '0'))
+    //     .join('');
+    // }
+
+    // // 测试运行
+    // async function test() {
+    //   const { device, computePipeline } = await initWebGPU();
+
+    //   // const inputData = new Uint8Array(64).fill(0); // 64字节全零
+    //   // const hash = await computeSHA256(device, computePipeline, inputData);
+    //   // console.log("全零哈希:", bytesToHex(hash));
+
+    //   // const inputData = new TextEncoder().encode("Hello WebGPU!");
+    //   // const paddedData = sha256Pad(inputData);
+    //   // console.log("填充后数据:", paddedData);
+    //   // const hash = await computeSHA256(device, computePipeline, inputData);
+    //   // console.log("短字符串哈希:", bytesToHex(hash));
+
+    //   // 测试1KB数据
+    //   const input1KB = new TextEncoder().encode("Hello WebGPU!");
+    //   const start1Kb = performance.now();
+    //   const hash1KB = await computeSHA256(device, computePipeline, input1KB);
+
+    //   // if (hash1KB.length == 0) console.log("budui");
+    //   // let str = "";
+    //   // for (let value of Array.from(new Uint32Array(hash1KB.buffer))) {
+    //   //   str += value.toString(16);
+    //   // }
+
+    //   // // console.log("1KB Hash:", Array.from(hash1KB).map(b => b.toString(16).padStart(2, '0')).join(''));
+    //   // console.log(hash1KB);
+    //   // console.log("1KB Hash:", str);
+    //   console.log(`1KB Time: ${performance.now() - start1Kb}ms`)
+
+    //   // 测试1MB数据
+    //   const input1MB = new Uint8Array(1024 * 1024).fill(65); // 填充'A'
+    //   const start1MB = performance.now();
+    //   const hash1MB = await computeSHA256(device, computePipeline, input1MB);
+    //   console.log(`1MB Time: ${performance.now() - start1MB}ms`);
+
+    //   // 测试100MB数据
+    //   // const input100MB = new Uint8Array(1 * 1024 * 1024);
+    //   // for (let i = 0; i < input100MB.length; i++) {
+    //   //   input100MB.set(input1MB, i * 1024 * 1024);
+    //   // }
+    //   // 分块生成，避免一次性分配大内存
+    //   const data100MB = new Uint8Array(100 * 1024 * 1024);
+    //   for (let i = 0; i < data100MB.length; i += 65536) {
+    //     const chunk = crypto.getRandomValues(new Uint8Array(65536));
+    //     data100MB.set(chunk, i);
+    //   }
+    //   const start100MB = performance.now();
+    //   const hash100MB = await computeSHA256(device, computePipeline, data100MB);
+    //   console.log(`100MB Time: ${performance.now() - start100MB}ms`);
+    // }
+    // test();
+
+
 
   </script>
 </body>
